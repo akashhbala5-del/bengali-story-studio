@@ -140,7 +140,24 @@ if ep.get('scenes'):
             for i,s in enumerate(scenes):
                 audio=Path(st.session_state.audio_paths.get(str(i),''))
                 if not audio.exists(): raise RuntimeError(f'Generate narration first. Missing scene {i+1} audio.')
-                dur=float(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(audio)]).decode().strip())
+                # Probe duration robustly: try format duration, then audio-stream duration.
+                dur=None
+                probe_errors=[]
+                for probe_args in (
+                    ['ffprobe','-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',str(audio)],
+                    ['ffprobe','-v','error','-show_entries','stream=duration','-of','default=noprint_wrappers=1:nokey=1',str(audio)],
+                ):
+                    try:
+                        raw=subprocess.check_output(probe_args,stderr=subprocess.STDOUT).decode().strip().splitlines()
+                        vals=[float(x) for x in raw if x.strip() and x.strip()!='N/A']
+                        if vals:
+                            dur=max(vals); break
+                    except Exception as probe_exc:
+                        probe_errors.append(str(probe_exc))
+                if dur is None:
+                    # Rendering can still proceed without duration probing; audio determines clip length.
+                    dur=30.0
+                    st.warning(f'Could not read duration for scene {i+1}; rendering with audio-driven duration and approximate subtitle timing.')
                 img=Path(s.get('image_path',''))
                 if not img.exists():
                     # generate fallback visual from title card using Pillow
@@ -161,10 +178,20 @@ if ep.get('scenes'):
                     caption=s.get('narration','').strip().replace('\n',' ')
                     sub.write_text(f'1\n{stamp(0)} --> {stamp(end)}\n{caption}\n',encoding='utf-8')
                     vf+=f",subtitles={sub.as_posix()}:force_style='FontName=Noto Sans Bengali,FontSize=26,Outline=2,Shadow=1,Alignment=2,MarginV=60"
-                subprocess.run(['ffmpeg','-y','-loop','1','-i',str(img),'-i',str(audio),'-t',str(dur),'-vf',vf,'-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest',str(clip)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+                # -shortest lets the narration determine scene duration; avoids relying on ffprobe.
+                render_cmd=['ffmpeg','-y','-loop','1','-i',str(img),'-i',str(audio),'-vf',vf,'-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest',str(clip)]
+                try:
+                    subprocess.run(render_cmd,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+                except subprocess.CalledProcessError as render_exc:
+                    detail=(render_exc.stderr or b'').decode(errors='replace')[-1800:]
+                    raise RuntimeError(f'FFmpeg failed on scene {i+1}. Details: {detail}') from render_exc
             concatfile.write_text('\n'.join(f"file '{c.as_posix()}'" for c in clips))
             output=temp/f'{safe_filename(ep_title)}.mp4'
-            subprocess.run(['ffmpeg','-y','-f','concat','-safe','0','-i',str(concatfile),'-c','copy',str(output)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+            try:
+                subprocess.run(['ffmpeg','-y','-f','concat','-safe','0','-i',str(concatfile),'-c','copy',str(output)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+            except subprocess.CalledProcessError as concat_exc:
+                detail=(concat_exc.stderr or b'').decode(errors='replace')[-1800:]
+                raise RuntimeError(f'Final video assembly failed. Details: {detail}') from concat_exc
             st.session_state.video_path=str(output); st.success('Video rendered!'); st.rerun()
         except Exception as e: st.error(f'Render failed: {e}')
     if st.session_state.get('video_path') and Path(st.session_state.video_path).exists():
