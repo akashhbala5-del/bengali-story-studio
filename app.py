@@ -159,7 +159,9 @@ if ep.get('scenes'):
                     dur=30.0
                     st.warning(f'Could not read duration for scene {i+1}; rendering with audio-driven duration and approximate subtitle timing.')
                 img=Path(s.get('image_path',''))
-                if not img.exists():
+                # Path('') resolves to the current directory ('.'), which exists but is not an image.
+                # Only accept an actual image file; otherwise create a fallback title card.
+                if not img.is_file():
                     # generate fallback visual from title card using Pillow
                     from PIL import Image,ImageDraw,ImageFont
                     card=Image.new('RGB',(W,H),(12,18,28)); draw=ImageDraw.Draw(card)
